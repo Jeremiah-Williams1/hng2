@@ -26,3 +26,25 @@ func Connect(connStr string) error {
 
 	return nil
 }
+
+func InitializeSchema() error {
+	const tableSchema = `
+    CREATE TABLE IF NOT EXISTS profiles (
+        id UUID PRIMARY KEY,
+        name VARCHAR NOT NULL UNIQUE,
+        gender VARCHAR CHECK (gender IN ('male', 'female')),
+        gender_probability FLOAT,
+        age INT,
+        age_group VARCHAR CHECK (age_group IN ('child', 'teenager', 'adult', 'senior')),
+        country_id VARCHAR(2),
+        country_name VARCHAR,
+        country_probability FLOAT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );`
+
+	_, err := DB.Exec(tableSchema)
+	if err != nil {
+		return err
+	}
+	return nil
+}

@@ -4,14 +4,69 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"profiles-api/db"
 	"profiles-api/models"
+	"profiles-api/queries"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+var countryNames = map[string]string{
+	"NG": "Nigeria",
+	"US": "United States",
+	"GB": "United Kingdom",
+	"IN": "India",
+	"BR": "Brazil",
+	"DE": "Germany",
+	"FR": "France",
+	"JP": "Japan",
+	"CN": "China",
+	"MX": "Mexico",
+	"KE": "Kenya",
+	"GH": "Ghana",
+	"ZA": "South Africa",
+	"EG": "Egypt",
+	"AO": "Angola",
+	"CA": "Canada",
+	"AU": "Australia",
+	"ID": "Indonesia",
+	"PK": "Pakistan",
+	"RU": "Russia",
+	"ES": "Spain",
+	"IT": "Italy",
+	"KR": "South Korea",
+	"TR": "Turkey",
+	"SA": "Saudi Arabia",
+	"AR": "Argentina",
+	"NL": "Netherlands",
+	"AE": "United Arab Emirates",
+	"SG": "Singapore",
+	"ET": "Ethiopia",
+}
+
+// Helper function
+func getCountryName(code string) string {
+	if name, ok := countryNames[code]; ok {
+		return name
+	}
+	return code // fallback: return the code itself
+}
+
+// getCountryID reverses the countryNames map: "nigeria" -> "NG"
+func getCountryID(name string) (string, bool) {
+	lower := strings.ToLower(name)
+	for code, countryName := range countryNames {
+		if strings.ToLower(countryName) == lower {
+			return code, true
+		}
+	}
+	return "", false
+}
 
 // Post handler
 func CreateProfile(w http.ResponseWriter, r *http.Request) {
@@ -41,10 +96,10 @@ func CreateProfile(w http.ResponseWriter, r *http.Request) {
 	// Logic to check if the name is already in the database
 	var p models.Profile
 	err = db.DB.QueryRow(`
-        SELECT id, name, gender, gender_probability, sample_size, age, age_group, country_id, country_probability, created_at
+        SELECT id, name, gender, gender_probability, age, age_group, country_id, country_name, country_probability, created_at
         FROM profiles WHERE LOWER(name) = LOWER($1)`, name).
-		Scan(&p.ID, &p.Name, &p.Gender, &p.GenderProbability, &p.SampleSize,
-			&p.Age, &p.AgeGroup, &p.CountryID, &p.CountryProbability, &p.CreatedAt)
+		Scan(&p.ID, &p.Name, &p.Gender, &p.GenderProbability,
+			&p.Age, &p.AgeGroup, &p.CountryID, &p.CountryName, &p.CountryProbability, &p.CreatedAt)
 
 	if err == nil {
 		w.WriteHeader(http.StatusOK)
@@ -138,28 +193,30 @@ func CreateProfile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	countryName := getCountryName(topCountry.CountryID)
+
 	// filling the response
 	response := models.Profile{
 		ID:                 uuid.Must(uuid.NewV7()).String(),
 		Name:               gRes.Data.Name,
 		Gender:             *gRes.Data.Gender,
 		GenderProbability:  gRes.Data.Probability,
-		SampleSize:         gRes.Data.Count,
 		Age:                *aRes.Data.Age,
 		AgeGroup:           ageGroup,
 		CountryID:          topCountry.CountryID,
+		CountryName:        countryName,
 		CountryProbability: topCountry.Probability,
-		CreatedAt:          time.Now().UTC().Format(time.RFC3339),
+		CreatedAt:          time.Now().UTC(),
 	}
 
 	// saving the db to the database
 	_, err = db.DB.Exec(`
         INSERT INTO profiles 
-        (id, name, gender, gender_probability, sample_size, age, age_group, country_id, country_probability, created_at)
+        (id, name, gender, gender_probability, age, age_group, country_id, country_name, country_probability, created_at)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
 		response.ID, response.Name, response.Gender, response.GenderProbability,
-		response.SampleSize, response.Age, response.AgeGroup,
-		response.CountryID, response.CountryProbability, response.CreatedAt,
+		response.Age, response.AgeGroup,
+		response.CountryID, response.CountryName, response.CountryProbability, response.CreatedAt,
 	)
 
 	if err != nil {
@@ -269,17 +326,17 @@ func GetProfileById(w http.ResponseWriter, r *http.Request) {
 
 	// use sql to get it from the database
 	row := db.DB.QueryRow(`
-        SELECT id, name, gender, gender_probability, sample_size, age, age_group, country_id, country_probability, created_at
+        SELECT id, name, gender, gender_probability, age, age_group, country_id, country_name, country_probability, created_at
         FROM profiles WHERE id = $1`, id)
 
 	var resp models.Profile
-	err := row.Scan(&resp.ID, &resp.Name, &resp.Gender, &resp.GenderProbability, &resp.SampleSize,
-		&resp.Age, &resp.AgeGroup, &resp.CountryID, &resp.CountryProbability, &resp.CreatedAt)
+	err := row.Scan(&resp.ID, &resp.Name, &resp.Gender, &resp.GenderProbability,
+		&resp.Age, &resp.AgeGroup, &resp.CountryID, &resp.CountryName, &resp.CountryProbability, &resp.CreatedAt)
 	if err == sql.ErrNoRows {
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(models.ErrorResponse{
 			Status:  "error",
-			Message: "Note with that ID isn't available",
+			Message: "Data not in Database",
 		})
 		return
 	}
@@ -297,61 +354,94 @@ func GetProfileById(w http.ResponseWriter, r *http.Request) {
 // Get for multiple profiles or all
 func GetProfiles(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
-	gender := strings.ToLower(query.Get("gender"))
-	countryID := strings.ToUpper(query.Get("country_id"))
-	ageGroup := strings.ToLower(query.Get("age_group"))
 
-	// Build query dynamically
-	sqlQuery := `SELECT id, name, gender, age, age_group, country_id FROM profiles WHERE 1=1`
-	args := []any{}
-	i := 1
+	builtQuery, err := BuildProfileQuery(models.ProfileQueryParams{
+		Gender:                strings.ToLower(query.Get("gender")),
+		CountryID:             strings.ToUpper(query.Get("country_id")),
+		AgeGroup:              strings.ToLower(query.Get("age_group")),
+		MinAge:                query.Get("min_age"),
+		MaxAge:                query.Get("max_age"),
+		MinGenderProbability:  query.Get("min_gender_probability"),
+		MinCountryProbability: query.Get("min_country_probability"),
+		SortBy:                strings.ToLower(query.Get("sort_by")),
+		OrderBy:               strings.ToLower(query.Get("order")),
+	})
+	if err != nil {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		json.NewEncoder(w).Encode(models.ErrorResponse{
+			Status: "error", Message: "Invalid query parameters",
+		})
+		return
+	}
 
-	if gender != "" {
-		sqlQuery += fmt.Sprintf(" AND LOWER(gender) = $%d", i)
-		args = append(args, gender)
-		i++
+	var page, limit int = 1, 10
+	numPage := query.Get("page")
+	numLimit := query.Get("limit")
+
+	var totalCount int
+	err = db.DB.QueryRow(builtQuery.CountQuery, builtQuery.Args...).Scan(&totalCount)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(models.ErrorResponse{
+			Status: "error", Message: err.Error(),
+		})
+		return
 	}
-	if countryID != "" {
-		sqlQuery += fmt.Sprintf(" AND UPPER(country_id) = $%d", i)
-		args = append(args, countryID)
-		i++
+
+	if numPage != "" {
+		page, err = strconv.Atoi(numPage)
+		if err != nil {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			json.NewEncoder(w).Encode(models.ErrorResponse{
+				Status: "error", Message: "Invalid query parameters",
+			})
+			return
+		}
 	}
-	if ageGroup != "" {
-		sqlQuery += fmt.Sprintf(" AND LOWER(age_group) = $%d", i)
-		args = append(args, ageGroup)
-		i++
+	if numLimit != "" {
+		limit, err = strconv.Atoi(numLimit)
+		if err != nil {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			json.NewEncoder(w).Encode(models.ErrorResponse{
+				Status: "error", Message: "Invalid query parameters",
+			})
+			return
+		}
+		if limit > 50 {
+			limit = 50
+		}
 	}
+
+	offset := (page - 1) * limit
+	i := len(builtQuery.Args) + 1
+	sqlQuery := builtQuery.SQLQuery
+	args := builtQuery.Args
+
+	sqlQuery += fmt.Sprintf(" LIMIT $%d", i)
+	args = append(args, limit)
+	i++
+
+	sqlQuery += fmt.Sprintf(" OFFSET $%d", i)
+	args = append(args, offset)
 
 	rows, err := db.DB.Query(sqlQuery, args...)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(models.ErrorResponse{
-			Status:  "error",
-			Message: err.Error(),
+			Status: "error", Message: err.Error(),
 		})
 		return
 	}
 	defer rows.Close()
 
-	// Separate list struct — only the fields the spec wants
-	type listProfile struct {
-		ID        string `json:"id"`
-		Name      string `json:"name"`
-		Gender    string `json:"gender"`
-		Age       int    `json:"age"`
-		AgeGroup  string `json:"age_group"`
-		CountryID string `json:"country_id"`
-	}
-
-	profiles := make([]listProfile, 0)
+	profiles := make([]models.Profile, 0)
 	for rows.Next() {
-		var p listProfile
-		err := rows.Scan(&p.ID, &p.Name, &p.Gender, &p.Age, &p.AgeGroup, &p.CountryID)
+		var p models.Profile
+		err := rows.Scan(&p.ID, &p.Name, &p.Gender, &p.GenderProbability, &p.Age, &p.AgeGroup, &p.CountryID, &p.CountryName, &p.CountryProbability, &p.CreatedAt)
 		if err != nil {
 			w.WriteHeader(http.StatusNotFound)
 			json.NewEncoder(w).Encode(models.ErrorResponse{
-				Status:  "error",
-				Message: err.Error(),
+				Status: "error", Message: err.Error(),
 			})
 			return
 		}
@@ -361,7 +451,9 @@ func GetProfiles(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(models.GSuccessResponse{
 		Status: "success",
-		Count:  len(profiles),
+		Page:   page,
+		Limit:  limit,
+		Total:  totalCount,
 		Data:   profiles,
 	})
 }
@@ -394,4 +486,213 @@ func DeleteProfile(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusNoContent)
 
+}
+
+func SearchProfiles(w http.ResponseWriter, r *http.Request) {
+	log.Print("the search handler was called")
+	rawQ := strings.TrimSpace(r.URL.Query().Get("q"))
+	if rawQ == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(models.ErrorResponse{
+			Status: "error", Message: "Unable to interpret query",
+		})
+		return
+	}
+
+	parsed, ok := queries.ParseNLQuery(rawQ, getCountryID)
+	if !ok {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(models.ErrorResponse{
+			Status: "error", Message: "Unable to interpret query",
+		})
+		return
+	}
+
+	builtQuery, err := BuildProfileQuery(models.ProfileQueryParams{
+		Gender:    parsed.Gender,
+		CountryID: parsed.CountryID,
+		AgeGroup:  parsed.AgeGroup,
+		MinAge:    parsed.MinAge,
+		MaxAge:    parsed.MaxAge,
+	})
+	if err != nil {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		json.NewEncoder(w).Encode(models.ErrorResponse{
+			Status: "error", Message: "Invalid query parameters",
+		})
+		return
+	}
+
+	query := r.URL.Query()
+	var page, limit int = 1, 10
+
+	if numPage := query.Get("page"); numPage != "" {
+		page, err = strconv.Atoi(numPage)
+		if err != nil {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			json.NewEncoder(w).Encode(models.ErrorResponse{
+				Status: "error", Message: "Invalid query parameters",
+			})
+			return
+		}
+	}
+	if numLimit := query.Get("limit"); numLimit != "" {
+		limit, err = strconv.Atoi(numLimit)
+		if err != nil {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			json.NewEncoder(w).Encode(models.ErrorResponse{
+				Status: "error", Message: "Invalid query parameters",
+			})
+			return
+		}
+		if limit > 50 {
+			limit = 50
+		}
+	}
+
+	var totalCount int
+	err = db.DB.QueryRow(builtQuery.CountQuery, builtQuery.Args...).Scan(&totalCount)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(models.ErrorResponse{
+			Status: "error", Message: err.Error(),
+		})
+		return
+	}
+
+	offset := (page - 1) * limit
+	i := len(builtQuery.Args) + 1
+	sqlQuery := builtQuery.SQLQuery
+	args := builtQuery.Args
+
+	sqlQuery += fmt.Sprintf(" LIMIT $%d", i)
+	args = append(args, limit)
+	i++
+	sqlQuery += fmt.Sprintf(" OFFSET $%d", i)
+	args = append(args, offset)
+
+	rows, err := db.DB.Query(sqlQuery, args...)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(models.ErrorResponse{
+			Status: "error", Message: err.Error(),
+		})
+		return
+	}
+	defer rows.Close()
+
+	profiles := make([]models.Profile, 0)
+	for rows.Next() {
+		var p models.Profile
+		err := rows.Scan(&p.ID, &p.Name, &p.Gender, &p.GenderProbability, &p.Age, &p.AgeGroup, &p.CountryID, &p.CountryName, &p.CountryProbability, &p.CreatedAt)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(models.ErrorResponse{
+				Status: "error", Message: err.Error(),
+			})
+			return
+		}
+		profiles = append(profiles, p)
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(models.GSuccessResponse{
+		Status: "success",
+		Page:   page,
+		Limit:  limit,
+		Total:  totalCount,
+		Data:   profiles,
+	})
+}
+
+// Helper function
+func BuildProfileQuery(p models.ProfileQueryParams) (models.ProfileQueryResult, error) {
+	sqlQuery := `SELECT id, name, gender, gender_probability, age, age_group, country_id, 
+    country_name, country_probability, created_at
+    FROM profiles WHERE 1=1`
+	countQuery := "SELECT COUNT(*) FROM profiles WHERE 1=1"
+
+	args := []any{}
+	i := 1
+
+	if p.Gender != "" {
+		sqlQuery += fmt.Sprintf(" AND LOWER(gender) = $%d", i)
+		countQuery += fmt.Sprintf(" AND LOWER(gender) = $%d", i)
+		args = append(args, p.Gender)
+		i++
+	}
+	if p.CountryID != "" {
+		sqlQuery += fmt.Sprintf(" AND country_id = $%d", i)
+		countQuery += fmt.Sprintf(" AND country_id = $%d", i)
+		args = append(args, p.CountryID)
+		i++
+	}
+	if p.AgeGroup != "" {
+		sqlQuery += fmt.Sprintf(" AND LOWER(age_group) = $%d", i)
+		countQuery += fmt.Sprintf(" AND LOWER(age_group) = $%d", i)
+		args = append(args, p.AgeGroup)
+		i++
+	}
+	if p.MinAge != "" {
+		val, err := strconv.Atoi(p.MinAge)
+		if err != nil {
+			return models.ProfileQueryResult{}, fmt.Errorf("invalid min_age")
+		}
+		sqlQuery += fmt.Sprintf(" AND age >= $%d", i)
+		countQuery += fmt.Sprintf(" AND age >= $%d", i)
+		args = append(args, val)
+		i++
+	}
+	if p.MaxAge != "" {
+		val, err := strconv.Atoi(p.MaxAge)
+		if err != nil {
+			return models.ProfileQueryResult{}, fmt.Errorf("invalid max_age")
+		}
+		sqlQuery += fmt.Sprintf(" AND age <= $%d", i)
+		countQuery += fmt.Sprintf(" AND age <= $%d", i)
+		args = append(args, val)
+		i++
+	}
+	if p.MinCountryProbability != "" {
+		val, err := strconv.ParseFloat(p.MinCountryProbability, 64)
+		if err != nil {
+			return models.ProfileQueryResult{}, fmt.Errorf("invalid min_country_probability")
+		}
+		sqlQuery += fmt.Sprintf(" AND country_probability >= $%d", i)
+		countQuery += fmt.Sprintf(" AND country_probability >= $%d", i)
+		args = append(args, val)
+		i++
+	}
+	if p.MinGenderProbability != "" {
+		val, err := strconv.ParseFloat(p.MinGenderProbability, 64)
+		if err != nil {
+			return models.ProfileQueryResult{}, fmt.Errorf("invalid min_gender_probability")
+		}
+		sqlQuery += fmt.Sprintf(" AND gender_probability >= $%d", i)
+		countQuery += fmt.Sprintf(" AND gender_probability >= $%d", i)
+		args = append(args, val)
+		i++
+	}
+	if p.SortBy != "" {
+		column := "created_at"
+		switch p.SortBy {
+		case "age":
+			column = "age"
+		case "created_at":
+			column = "created_at"
+		case "gender_probability":
+			column = "gender_probability"
+		}
+		sortOrder := "ASC"
+		if p.OrderBy == "desc" {
+			sortOrder = "DESC"
+		}
+		sqlQuery += fmt.Sprintf(" ORDER BY %s %s", column, sortOrder)
+	}
+
+	return models.ProfileQueryResult{
+		SQLQuery:   sqlQuery,
+		CountQuery: countQuery,
+		Args:       args,
+	}, nil
 }

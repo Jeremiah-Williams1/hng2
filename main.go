@@ -21,23 +21,29 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 func main() {
 	connStr := os.Getenv("DATABASE_URL")
 	if connStr == "" {
-		connStr = "postgres://postgres:postgres@localhost:5432/profiles_db"
+		connStr = "postgres://jeremiah:mypassword123@localhost:5432/profiles_db"
 	}
 
 	err := db.Connect(connStr)
 	if err != nil {
 		log.Fatalf("Could not connect to database: %v", err)
 	}
+	err = db.InitializeSchema()
+	if err != nil {
+		log.Fatalf("Could initialized db: %v", err)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/profiles", corsMiddleware(handlers.CreateProfile))
+	mux.HandleFunc("GET /api/profiles/search", corsMiddleware(handlers.SearchProfiles))
 	mux.HandleFunc("GET /api/profiles/{id}", corsMiddleware(handlers.GetProfileById))
 	mux.HandleFunc("GET /api/profiles", corsMiddleware(handlers.GetProfiles))
 	mux.HandleFunc("DELETE /api/profiles/{id}", corsMiddleware(handlers.DeleteProfile))
 
 	port := os.Getenv("PORT")
 	if port == "" {
-		log.Printf("Couldn't reach port :%s", port)
+		port = "8080"
+		// log.Printf("Couldn't reach port :%s", port)
 	}
 
 	srv := http.Server{
