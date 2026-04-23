@@ -21,7 +21,7 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 func main() {
 	connStr := os.Getenv("DATABASE_URL")
 	if connStr == "" {
-		connStr = "postgres://jeremiah:mypassword123@localhost:5432/profiles_db"
+		connStr = "postgres://jeremiah:newpassword@localhost:5432/profiles_db"
 	}
 
 	err := db.Connect(connStr)
