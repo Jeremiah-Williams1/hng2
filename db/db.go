@@ -42,9 +42,43 @@ func InitializeSchema() error {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );`
 
+	const userSchema = `
+    CREATE TABLE IF NOT EXISTS users (
+    	id UUID PRIMARY KEY,
+		github_id VARCHAR UNIQUE,
+		avatar_url TEXT,
+		username TEXT,
+		email TEXT UNIQUE,
+		role VARCHAR CHECK (role IN ('admin', 'analyst')) DEFAULT 'analyst',
+		is_active BOOL DEFAULT TRUE,
+		last_login_at TIMESTAMPTZ,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+
+    );`
+
+	const tokenSchema = `
+    CREATE TABLE IF NOT EXISTS tokens (
+        id UUID PRIMARY KEY,
+		user_id UUID REFERENCES users(id),
+		token TEXT,
+		expires_at TIMESTAMPTZ,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );`
+
 	_, err := DB.Exec(tableSchema)
 	if err != nil {
 		return err
 	}
+
+	_, err = DB.Exec(userSchema)
+	if err != nil {
+		return err
+	}
+
+	_, err = DB.Exec(tokenSchema)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
