@@ -3,6 +3,7 @@ package handlers
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -144,6 +145,95 @@ func GithubCallback(w http.ResponseWriter, r *http.Request) {
 // POST
 func RefreshToken(w http.ResponseWriter, r *http.Request) {
 
+	type RefreshRequest struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	// Decode the request of the post
+	var requestData RefreshRequest
+	err := json.NewDecoder(r.Body).Decode(&requestData)
+
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(models.ErrorResponse{
+			Status:  "error",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	// Get userID and check if the token exist and if expired
+	var userID string
+	var role string
+
+	query := `
+        SELECT user_id, expires_at 
+        FROM tokens 
+        WHERE token = $1 AND expires_at > NOW()`
+
+	err = db.DB.QueryRow(query, requestData.RefreshToken).Scan(&userID)
+
+	// Check if exists and if expired
+	if err == sql.ErrNoRows {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(models.ErrorResponse{
+			Status:  "error",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	// Deleter the token
+	_, err = db.DB.Exec("DELETE FROM tokens WHERE token = $1", requestData.RefreshToken)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(models.ErrorResponse{
+			Status:  "error",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	query = `
+        SELECT role FROM users 
+        WHERE id = $1`
+
+	err = db.DB.QueryRow(query, userID).Scan(&role)
+	if err == sql.ErrNoRows {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(models.ErrorResponse{
+			Status:  "error",
+			Message: err.Error(),
+		})
+		return
+	}
+	// generate new tokens
+	jwtaccessToken, err := generateAccessToken(userID, role)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(models.ErrorResponse{
+			Status:  "error",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	refreshToken, err := generateRefreshToken(userID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(models.ErrorResponse{
+			Status:  "error",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	// returns them
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]any{
+		"status":        "success",
+		"access_token":  jwtaccessToken,
+		"refresh_token": refreshToken,
+	})
 }
 
 // POST
