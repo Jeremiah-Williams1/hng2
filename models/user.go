@@ -39,3 +39,7 @@ type MyClaim struct {
 	Role string `json:"role"`
 	jwt.RegisteredClaims
 }
+
+type RefreshRequest struct {
+	RefreshToken string `json:"refresh_token"`
+}

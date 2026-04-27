@@ -60,12 +60,20 @@ type ExistResponse struct {
 	Data    any    `json:"data"`
 }
 
+type PaginationLinks struct {
+	Self string  `json:"self"`
+	Next *string `json:"next"`
+	Prev *string `json:"prev"`
+}
+
 type GSuccessResponse struct {
-	Status string `json:"status"`
-	Page   int    `json:"page"`
-	Limit  int    `json:"limit"`
-	Total  int    `json:"total"`
-	Data   any    `json:"data"`
+	Status     string          `json:"status"`
+	Page       int             `json:"page"`
+	Limit      int             `json:"limit"`
+	Total      int             `json:"total"`
+	TotalPages int             `json:"total_pages"`
+	Link       PaginationLinks `json:"links"`
+	Data       any             `json:"data"`
 }
 
 // Error REsponse

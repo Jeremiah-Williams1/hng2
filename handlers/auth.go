@@ -145,11 +145,8 @@ func GithubCallback(w http.ResponseWriter, r *http.Request) {
 // POST
 func RefreshToken(w http.ResponseWriter, r *http.Request) {
 
-	type RefreshRequest struct {
-		RefreshToken string `json:"refresh_token"`
-	}
 	// Decode the request of the post
-	var requestData RefreshRequest
+	var requestData models.RefreshRequest
 	err := json.NewDecoder(r.Body).Decode(&requestData)
 
 	if err != nil {
@@ -166,8 +163,7 @@ func RefreshToken(w http.ResponseWriter, r *http.Request) {
 	var role string
 
 	query := `
-        SELECT user_id, expires_at 
-        FROM tokens 
+        SELECT user_id FROM tokens 
         WHERE token = $1 AND expires_at > NOW()`
 
 	err = db.DB.QueryRow(query, requestData.RefreshToken).Scan(&userID)
@@ -238,6 +234,47 @@ func RefreshToken(w http.ResponseWriter, r *http.Request) {
 
 // POST
 func Logout(w http.ResponseWriter, r *http.Request) {
+	var requestData models.RefreshRequest
+	err := json.NewDecoder(r.Body).Decode(&requestData)
+
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(models.ErrorResponse{
+			Status:  "error",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	result, err := db.DB.Exec("DELETE FROM tokens WHERE token = $1", requestData.RefreshToken)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(models.ErrorResponse{
+			Status:  "error",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	count, err := result.RowsAffected()
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(models.ErrorResponse{
+			Status:  "error",
+			Message: err.Error(),
+		})
+		return
+	}
+	if count == 0 {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(models.ErrorResponse{
+			Status:  "error",
+			Message: "Profile not found",
+		})
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 
 }
 

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"database/sql"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -447,14 +448,35 @@ func GetProfiles(w http.ResponseWriter, r *http.Request) {
 		}
 		profiles = append(profiles, p)
 	}
+	totalPages := (totalCount + limit - 1) / limit
+	buildURL := func(p int) string {
+		return fmt.Sprintf("%s?page=%d&limit=%d", r.URL.Path, p, limit)
+	}
+
+	links := models.PaginationLinks{
+		Self: buildURL(page),
+	}
+	// Handle Next link
+	if page < totalPages {
+		nextAddr := buildURL(page + 1)
+		links.Next = &nextAddr
+	}
+
+	// Handle Prev link
+	if page > 1 {
+		prevAddr := buildURL(page - 1)
+		links.Prev = &prevAddr
+	}
 
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(models.GSuccessResponse{
-		Status: "success",
-		Page:   page,
-		Limit:  limit,
-		Total:  totalCount,
-		Data:   profiles,
+		Status:     "success",
+		Page:       page,
+		Limit:      limit,
+		Total:      totalCount,
+		TotalPages: totalPages,
+		Link:       links,
+		Data:       profiles,
 	})
 }
 
@@ -595,14 +617,131 @@ func SearchProfiles(w http.ResponseWriter, r *http.Request) {
 		profiles = append(profiles, p)
 	}
 
+	totalPages := (totalCount + limit - 1) / limit
+	buildURL := func(p int) string {
+		return fmt.Sprintf("%s?page=%d&limit=%d", r.URL.Path, p, limit)
+	}
+
+	links := models.PaginationLinks{
+		Self: buildURL(page),
+	}
+	// Handle Next link
+	if page < totalPages {
+		nextAddr := buildURL(page + 1)
+		links.Next = &nextAddr
+	}
+
+	// Handle Prev link
+	if page > 1 {
+		prevAddr := buildURL(page - 1)
+		links.Prev = &prevAddr
+	}
+
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(models.GSuccessResponse{
-		Status: "success",
-		Page:   page,
-		Limit:  limit,
-		Total:  totalCount,
-		Data:   profiles,
+		Status:     "success",
+		Page:       page,
+		Limit:      limit,
+		Total:      totalCount,
+		TotalPages: totalPages,
+		Link:       links,
+		Data:       profiles,
 	})
+}
+
+// Export csv Endpoint
+func ExportProfiles(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	format := query.Get("format")
+	if format != "csv" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(models.ErrorResponse{Status: "error", Message: "Unsupported format, use format=csv"})
+		return
+	}
+
+	// 1. Reuse your existing filter/sort logic
+	builtQuery, err := BuildProfileQuery(models.ProfileQueryParams{
+		Gender:                strings.ToLower(query.Get("gender")),
+		CountryID:             strings.ToUpper(query.Get("country_id")),
+		AgeGroup:              strings.ToLower(query.Get("age_group")),
+		MinAge:                query.Get("min_age"),
+		MaxAge:                query.Get("max_age"),
+		MinGenderProbability:  query.Get("min_gender_probability"),
+		MinCountryProbability: query.Get("min_country_probability"),
+		SortBy:                strings.ToLower(query.Get("sort_by")),
+		OrderBy:               strings.ToLower(query.Get("order")),
+	})
+	if err != nil {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		json.NewEncoder(w).Encode(models.ErrorResponse{Status: "error", Message: "Invalid query parameters"})
+		return
+	}
+
+	// 2. Execute query (No LIMIT/OFFSET for export)
+	rows, err := db.DB.Query(builtQuery.SQLQuery, builtQuery.Args...)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(models.ErrorResponse{
+			Status:  "error",
+			Message: err.Error(),
+		})
+		return
+	}
+	defer rows.Close()
+
+	// 3. Set CSV Headers
+	w.Header().Set("Content-Type", "text/csv")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="profiles_%s.csv"`, time.Now().Format("20060102_150405")))
+
+	// 4. Initialize CSV Writer
+	writer := csv.NewWriter(w)
+	defer writer.Flush()
+
+	// Write Header Row
+	header := []string{
+		"id", "name", "gender", "gender_probability", "age",
+		"age_group", "country_id", "country_name", "country_probability", "created_at",
+	}
+	err = writer.Write(header)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(models.ErrorResponse{
+			Status:  "error",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	// 5. Stream Rows to CSV
+	for rows.Next() {
+		var p models.Profile
+		err := rows.Scan(
+			&p.ID, &p.Name, &p.Gender, &p.GenderProbability, &p.Age,
+			&p.AgeGroup, &p.CountryID, &p.CountryName, &p.CountryProbability, &p.CreatedAt,
+		)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(models.ErrorResponse{
+				Status:  "error",
+				Message: err.Error(),
+			})
+			return
+		}
+
+		record := []string{
+			p.ID,
+			p.Name,
+			p.Gender,
+			fmt.Sprintf("%.2f", p.GenderProbability),
+			strconv.Itoa(p.Age),
+			p.AgeGroup,
+			p.CountryID,
+			p.CountryName,
+			fmt.Sprintf("%.2f", p.CountryProbability),
+			p.CreatedAt.Format(time.RFC3339),
+		}
+		writer.Write(record)
+	}
 }
 
 // Helper function
