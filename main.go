@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"profiles-api/db"
 	"profiles-api/handlers"
@@ -40,43 +41,64 @@ func main() {
 	}
 	err = db.InitializeSchema()
 	if err != nil {
-		log.Fatalf("Could initialized db: %v", err)
+		log.Fatalf("Could not initialize db: %v", err)
 	}
 
 	mux := http.NewServeMux()
 
-	// --- Public Auth Routes ---
-	mux.HandleFunc("GET /auth/github", corsMiddleware(handlers.GithubLogin))
-	mux.HandleFunc("GET /auth/github/callback", corsMiddleware(handlers.GithubCallback))
-	mux.HandleFunc("POST /auth/refresh", corsMiddleware(handlers.RefreshToken))
-	mux.HandleFunc("POST /auth/logout", corsMiddleware(handlers.Logout))
+	// --- Auth Routes (rate limited to 10/min) ---
+	mux.HandleFunc("GET /auth/github",
+		middleware.LoggingMiddleware(
+			middleware.RateLimiterMiddleWare(10, time.Minute)(
+				corsMiddleware(handlers.GithubLogin))))
 
-	// --- Protected Profile Routes ---
-	// Wrapped in AuthMiddleware so only logged-in users can access
+	mux.HandleFunc("GET /auth/github/callback",
+		middleware.LoggingMiddleware(
+			middleware.RateLimiterMiddleWare(10, time.Minute)(
+				corsMiddleware(handlers.GithubCallback))))
+
+	mux.HandleFunc("POST /auth/refresh",
+		middleware.LoggingMiddleware(
+			middleware.RateLimiterMiddleWare(10, time.Minute)(
+				corsMiddleware(handlers.RefreshToken))))
+
+	mux.HandleFunc("POST /auth/logout",
+		middleware.LoggingMiddleware(
+			middleware.RateLimiterMiddleWare(10, time.Minute)(
+				corsMiddleware(handlers.Logout))))
+
+	// --- Protected Profile Routes (rate limited to 60/min) ---
 	mux.HandleFunc("POST /api/profiles",
-		corsMiddleware(middleware.VersionMiddleware(middleware.AuthMiddleware(
-			middleware.RBACMiddleware("admin")(handlers.CreateProfile),
-		))))
+		middleware.LoggingMiddleware(
+			middleware.RateLimiterMiddleWare(60, time.Minute)(
+				corsMiddleware(middleware.VersionMiddleware(middleware.AuthMiddleware(
+					middleware.RBACMiddleware("admin")(handlers.CreateProfile)))))))
 
 	mux.HandleFunc("GET /api/profiles/search",
-		corsMiddleware(middleware.VersionMiddleware(middleware.AuthMiddleware(handlers.SearchProfiles))))
+		middleware.LoggingMiddleware(
+			middleware.RateLimiterMiddleWare(60, time.Minute)(
+				corsMiddleware(middleware.VersionMiddleware(middleware.AuthMiddleware(handlers.SearchProfiles))))))
 
 	mux.HandleFunc("GET /api/profiles/export",
-		corsMiddleware(middleware.VersionMiddleware(middleware.AuthMiddleware(handlers.GetProfileById))))
+		middleware.LoggingMiddleware(
+			middleware.RateLimiterMiddleWare(60, time.Minute)(
+				corsMiddleware(middleware.VersionMiddleware(middleware.AuthMiddleware(handlers.ExportProfiles))))))
 
 	mux.HandleFunc("GET /api/profiles/{id}",
-		corsMiddleware(middleware.VersionMiddleware(middleware.AuthMiddleware(handlers.GetProfileById))))
+		middleware.LoggingMiddleware(
+			middleware.RateLimiterMiddleWare(60, time.Minute)(
+				corsMiddleware(middleware.VersionMiddleware(middleware.AuthMiddleware(handlers.GetProfileById))))))
 
 	mux.HandleFunc("GET /api/profiles",
-		corsMiddleware(
-			middleware.VersionMiddleware(middleware.AuthMiddleware(handlers.GetProfiles)),
-		))
+		middleware.LoggingMiddleware(
+			middleware.RateLimiterMiddleWare(60, time.Minute)(
+				corsMiddleware(middleware.VersionMiddleware(middleware.AuthMiddleware(handlers.GetProfiles))))))
 
-	// Example of nested Middleware: Only Admins can delete profiles
 	mux.HandleFunc("DELETE /api/profiles/{id}",
-		corsMiddleware(middleware.VersionMiddleware(middleware.AuthMiddleware(
-			middleware.RBACMiddleware("admin")(handlers.DeleteProfile),
-		))))
+		middleware.LoggingMiddleware(
+			middleware.RateLimiterMiddleWare(60, time.Minute)(
+				corsMiddleware(middleware.VersionMiddleware(middleware.AuthMiddleware(
+					middleware.RBACMiddleware("admin")(handlers.DeleteProfile)))))))
 
 	port := os.Getenv("PORT")
 	if port == "" {
