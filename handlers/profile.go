@@ -496,7 +496,7 @@ func DeleteProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	count, err := result.RowsAffected()
+	count, _ := result.RowsAffected()
 	if count == 0 {
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(models.ErrorResponse{
