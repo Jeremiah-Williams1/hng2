@@ -142,6 +142,61 @@ func GithubCallback(w http.ResponseWriter, r *http.Request) {
 
 }
 
+func GithubCallbackCLI(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Code         string `json:"code"`
+		CodeVerifier string `json:"code_verifier"`
+	}
+	json.NewDecoder(r.Body).Decode(&body)
+
+	accessToken, err := exchangeCodeForToken(body.Code, body.CodeVerifier)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(models.ErrorResponse{Status: "error", Message: err.Error()})
+		return
+	}
+
+	githubUser, err := getGithubUser(accessToken)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(models.ErrorResponse{Status: "error", Message: err.Error()})
+		return
+	}
+
+	user, err := upsertUser(githubUser)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(models.ErrorResponse{Status: "error", Message: err.Error()})
+		return
+	}
+
+	if !user.IsActive {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(models.ErrorResponse{Status: "error", Message: "User not active"})
+		return
+	}
+
+	jwtToken, err := generateAccessToken(user.ID.String(), user.Role)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(models.ErrorResponse{Status: "error", Message: err.Error()})
+		return
+	}
+
+	refreshToken, err := generateRefreshToken(user.ID.String())
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(models.ErrorResponse{Status: "error", Message: err.Error()})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"status":        "success",
+		"access_token":  jwtToken,
+		"refresh_token": refreshToken,
+	})
+}
+
 // POST
 func RefreshToken(w http.ResponseWriter, r *http.Request) {
 

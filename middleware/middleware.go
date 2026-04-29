@@ -139,7 +139,7 @@ func (r *RateLimiter) Allow(clientId string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	val, _ := r.requests[clientId]
+	val := r.requests[clientId]
 
 	// set the threshold. Now going back window seconds(which is whatever we se)
 	threshold := time.Now().Add(-r.window)
