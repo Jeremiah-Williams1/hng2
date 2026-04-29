@@ -100,6 +100,12 @@ func main() {
 				corsMiddleware(middleware.VersionMiddleware(middleware.AuthMiddleware(
 					middleware.RBACMiddleware("admin")(handlers.DeleteProfile)))))))
 
+	// --- CLI Callback
+	mux.HandleFunc("POST /auth/github/callback",
+		middleware.LoggingMiddleware(
+			middleware.RateLimiterMiddleWare(10, time.Minute)(
+				corsMiddleware(handlers.GithubCallbackCLI))))
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
