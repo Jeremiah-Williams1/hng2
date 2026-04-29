@@ -1,63 +1,146 @@
 # Insighta Labs+ — Backend
 
-The backend for the Insighta Labs+ platform. Built on top of the Profiles Intelligence System (Stage 2/3), now extended with authentication, role-based access control, and multi-interface support.
+The core API server for the Insighta Labs+ platform. Built on top of the Profile Intelligence System, extended with authentication, role-based access control, and multi-interface support.
+
+---
 
 ## System Architecture
 
-Three repositories make up the full platform:
-- **Backend** (this repo) — REST API, authentication, database
-- **CLI** — `insighta-cli` — command line interface
-- **Web Portal** — browser-based interface
+The platform consists of three independent repositories that share a single backend:
 
-Both the CLI and web portal talk to this backend.
+```
+┌─────────────────┐         ┌─────────────────────────────┐
+│   Browser       │────────▶│   insighta-web (port 3000)  │
+│   (Web Portal)  │◀────────│   Go SSR server             │
+└─────────────────┘         └────────────┬────────────────┘
+                                         │ HTTP + JWT
+┌─────────────────┐                      ▼
+│   Terminal      │         ┌─────────────────────────────┐
+│   (CLI)         │────────▶│   insighta-api (port 8080)  │
+└─────────────────┘         │   Go REST API + PostgreSQL  │
+                            └─────────────────────────────┘
+```
+
+Both the CLI and the web portal are clients of the backend API. The backend is the single source of truth — all data, authentication, and business logic lives here.
+
+---
 
 ## Authentication Flow
 
-This backend uses GitHub OAuth with PKCE.
+This system uses GitHub OAuth 2.0 with PKCE (Proof Key for Code Exchange).
 
-**Browser flow:**
-1. Client hits `GET /auth/github`
-2. Backend redirects to GitHub OAuth page
-3. User approves on GitHub
-4. GitHub redirects to `GET /auth/github/callback`
-5. Backend exchanges code, upserts user, returns access + refresh tokens
+### Browser Flow
+```
+1. User visits /auth/github
+2. Backend generates state + code_verifier + code_challenge
+3. Backend redirects user to GitHub OAuth page
+4. User approves on GitHub
+5. GitHub redirects to GET /auth/github/callback with a code
+6. Backend exchanges code + code_verifier with GitHub for an access token
+7. Backend calls GitHub /user API to get user info
+8. Backend upserts user in database
+9. Backend issues JWT access token + refresh token
+10. Tokens returned as JSON (web portal stores them as HTTP-only cookies)
+```
 
-**CLI flow:**
-1. CLI starts a local server on port 9999
-2. CLI opens GitHub OAuth page in browser
-3. GitHub redirects to `localhost:9999/callback`
-4. CLI catches the code, sends it to `POST /auth/github/callback` with the PKCE verifier
-5. Backend exchanges code, returns access + refresh tokens
-6. CLI saves tokens to `~/.insighta/credentials.json`
+### CLI Flow
+```
+1. CLI generates state + code_verifier + code_challenge locally
+2. CLI starts a temporary local server on port 9999
+3. CLI opens GitHub OAuth page in browser
+4. GitHub redirects to localhost:9999/callback
+5. CLI captures code + validates state
+6. CLI sends code + code_verifier to POST /auth/github/callback
+7. Backend exchanges with GitHub, upserts user, returns tokens
+8. CLI saves tokens to ~/.insighta/credentials.json
+```
+
+### PKCE Explained
+PKCE prevents code interception attacks. The CLI generates a random `code_verifier`, hashes it to produce a `code_challenge`, and sends the challenge to GitHub upfront. When exchanging the code, it sends the original verifier. GitHub hashes it and confirms it matches — proving the exchange comes from the same client that started the flow.
+
+---
 
 ## Token Handling
 
-| Token | Expiry | Storage |
-|-------|--------|---------|
-| Access token (JWT) | 3 minutes | Client-side |
-| Refresh token | 5 minutes | Database + client |
+| Token | Type | Expiry | Storage |
+|-------|------|--------|---------|
+| Access token | JWT (HS256) | 3 minutes | Client-side (cookie or file) |
+| Refresh token | Random string | 5 minutes | Database + client |
 
-Refresh tokens are single-use. Each refresh issues a new pair and invalidates the old refresh token.
+**Refresh token rotation:** Every call to `POST /auth/refresh` invalidates the old refresh token and issues a new pair. One-time use only.
 
-## Roles
+**JWT claims:** `id` (user UUID), `role` (admin/analyst), `exp` (expiry timestamp)
+
+---
+
+## Role Enforcement
+
+Two roles exist in the system:
 
 | Role | Permissions |
 |------|-------------|
-| `admin` | Full access — create, delete, read, search profiles |
-| `analyst` | Read only — get, list, search profiles |
+| `admin` | Full access — create profiles, delete profiles, read, search, export |
+| `analyst` | Read only — get, list, search, export profiles |
 
-Default role on signup: `analyst`
+Default role on first login: `analyst`
+
+### How it works
+Role enforcement uses two middleware layers applied at the route level:
+
+1. **AuthMiddleware** — validates the JWT, extracts `id` and `role`, injects them into the request context
+2. **RBACMiddleware("admin")** — reads role from context, rejects with 403 if the user is not an admin
+
+```
+Request → AuthMiddleware → RBACMiddleware("admin") → Handler
+```
+
+Routes requiring admin: `POST /api/profiles`, `DELETE /api/profiles/{id}`
+
+All other `/api/*` routes require authentication but not a specific role.
+
+---
+
+## Natural Language Parsing
+
+The `GET /api/profiles/search?q=` endpoint accepts plain English queries and converts them to structured SQL filters.
+
+**How it works:**
+1. Query string is lowercased and split into tokens
+2. Keywords are matched against a whitelist — no user input is ever interpolated into SQL
+3. Matched values are passed as `$1`, `$2` parameterized query arguments
+
+**Supported patterns:**
+
+| Query | Parsed as |
+|-------|-----------|
+| `young males from nigeria` | gender=male, country=NG, age_group=young adult |
+| `females above 30` | gender=female, min_age=30 |
+| `adult males from kenya` | gender=male, age_group=adult, country=KE |
+| `seniors` | age_group=senior |
+| `teenagers from us` | age_group=teenager, country=US |
+
+Age group mapping: child (0-12), teenager (13-17), young/young adult (18-30), adult (18-65), senior (65+)
+
+---
 
 ## Running Locally
 
-1. Clone the repo
-2. Create a GitHub OAuth App:
-   - Homepage URL: `http://localhost:8080`
-   - Callback URL: `http://localhost:8080/auth/github/callback`
-3. Copy `.env.example` to `.env` and fill in values
-4. Set up PostgreSQL — tables are created automatically on startup
-5. Run the seed script: `go run cmd/seed/main.go`
-6. Start the server: `go run main.go`
+**Prerequisites:** Go 1.26+, PostgreSQL
+
+```bash
+git clone <repo>
+cd insighta-api
+
+# Create .env file
+cp .env.example .env
+# Fill in GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, JWT_SECRET
+
+# Tables are created automatically on startup
+go run main.go
+
+# Seed with sample data
+go run cmd/seed/main.go
+```
 
 ## Environment Variables
 
@@ -70,33 +153,32 @@ REDIRECT_URI=http://localhost:8080/auth/github/callback
 PORT=8080
 ```
 
-## Endpoints
+---
 
-### Auth
+## API Reference
+
+### Auth Endpoints
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/auth/github` | Redirect to GitHub OAuth |
-| GET | `/auth/github/callback` | GitHub OAuth callback (browser) |
-| POST | `/auth/github/callback` | GitHub OAuth callback (CLI) |
-| POST | `/auth/refresh` | Refresh access token |
+| GET | `/auth/github/callback` | Browser OAuth callback |
+| POST | `/auth/github/callback` | CLI OAuth callback |
+| POST | `/auth/refresh` | Refresh tokens |
 | POST | `/auth/logout` | Invalidate refresh token |
 
-### Profiles
-All profile endpoints require `Authorization: Bearer <token>` and `X-API-Version: 1` headers.
+### Profile Endpoints
+All require `Authorization: Bearer <token>` and `X-API-Version: 1`
 
 | Method | Endpoint | Role | Description |
 |--------|----------|------|-------------|
-| POST | `/api/profiles` | admin | Create a profile |
-| GET | `/api/profiles` | any | List profiles with filters |
+| POST | `/api/profiles` | admin | Create profile |
+| GET | `/api/profiles` | any | List with filters + pagination |
 | GET | `/api/profiles/search` | any | Natural language search |
-| GET | `/api/profiles/export` | any | Export profiles as CSV |
-| GET | `/api/profiles/{id}` | any | Get profile by ID |
-| DELETE | `/api/profiles/{id}` | admin | Delete a profile |
+| GET | `/api/profiles/export` | any | Export CSV |
+| GET | `/api/profiles/{id}` | any | Get by ID |
+| DELETE | `/api/profiles/{id}` | admin | Delete profile |
 
-### Query Parameters (GET /api/profiles)
-`gender`, `country_id`, `age_group`, `min_age`, `max_age`, `min_gender_probability`, `min_country_probability`, `sort_by`, `order`, `page`, `limit`
-
-### Pagination Response Shape
+### Pagination Response
 ```json
 {
   "status": "success",
@@ -113,18 +195,31 @@ All profile endpoints require `Authorization: Bearer <token>` and `X-API-Version
 }
 ```
 
-## Rate Limiting
+### Rate Limiting
 | Scope | Limit |
 |-------|-------|
 | `/auth/*` | 10 requests/minute |
-| `/api/*` | 60 requests/minute per user |
+| `/api/*` | 60 requests/minute |
 
-## Natural Language Search Examples
-- `?q=young males from nigeria`
-- `?q=females above 30`
-- `?q=adult males from kenya`
+---
 
-## Redeployment
+## Deployment (EC2)
+
 ```bash
-git pull && go build -o server . && pkill server && nohup ./server > server.log 2>&1 &
+# SSH into instance
+ssh -i hng-key.pem ubuntu@YOUR_IP
+
+# Pull and rebuild
+git pull
+go build -o server .
+
+# Create/update .env with production values
+nano .env
+
+# Restart server
+pkill server
+nohup ./server > server.log 2>&1 &
+
+# View logs
+tail -f server.log
 ```
