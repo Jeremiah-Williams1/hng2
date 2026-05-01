@@ -115,7 +115,7 @@ func main() {
 	// --- CLI Callback
 	mux.HandleFunc("POST /auth/github/callback",
 		middleware.LoggingMiddleware(
-			middleware.RateLimiterMiddleWare(10, time.Minute)(
+			middleware.RateLimiterMiddleWare(19, time.Minute)(
 				corsMiddleware(handlers.GithubCallbackCLI))))
 
 	port := os.Getenv("PORT")

@@ -19,10 +19,11 @@ func main() {
 	godotenv.Load()
 
 	analystID := os.Args[1] // pass the UUID as argument
+	role := os.Args[2]
 
 	claims := MyClaim{
 		ID:   analystID,
-		Role: "analyst",
+		Role: role,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
 		},
