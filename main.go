@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"profiles-api/db"
@@ -15,13 +16,18 @@ import (
 
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		// For preflight requests
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Version")
+
 		if r.Method == http.MethodOptions {
-			w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, DELETE")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.WriteHeader(http.StatusNoContent)
 			return
+		}
+
+		if r.Header.Get("Content-Type") == "" ||
+			!strings.Contains(r.Header.Get("Accept"), "text/html") {
+			w.Header().Set("Content-Type", "application/json")
 		}
 
 		next(w, r)
@@ -32,7 +38,7 @@ func main() {
 	godotenv.Load()
 	connStr := os.Getenv("DATABASE_URL")
 	if connStr == "" {
-		connStr = "postgres://jeremiah:newpassword@localhost:5432/profiles_db"
+		connStr = "postgres://jeremiah:yourpassword@localhost:5432/profiles_db"
 	}
 
 	err := db.Connect(connStr)
@@ -100,10 +106,16 @@ func main() {
 				corsMiddleware(middleware.VersionMiddleware(middleware.AuthMiddleware(
 					middleware.RBACMiddleware("admin")(handlers.DeleteProfile)))))))
 
+	mux.HandleFunc("GET /api/users/me",
+		middleware.LoggingMiddleware(
+			middleware.RateLimiterMiddleWare(60, time.Minute)(
+				corsMiddleware(middleware.VersionMiddleware(
+					middleware.AuthMiddleware(handlers.GetMe))))))
+
 	// --- CLI Callback
 	mux.HandleFunc("POST /auth/github/callback",
 		middleware.LoggingMiddleware(
-			middleware.RateLimiterMiddleWare(10, time.Minute)(
+			middleware.RateLimiterMiddleWare(19, time.Minute)(
 				corsMiddleware(handlers.GithubCallbackCLI))))
 
 	port := os.Getenv("PORT")
