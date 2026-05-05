@@ -55,7 +55,7 @@ func main() {
 	// --- Auth Routes (rate limited to 10/min) ---
 	mux.HandleFunc("GET /auth/github",
 		middleware.LoggingMiddleware(
-			middleware.RateLimiterMiddleWare(10, time.Minute)(
+			middleware.RateLimiterMiddleWare(2, time.Minute)(
 				corsMiddleware(handlers.GithubLogin))))
 
 	mux.HandleFunc("GET /auth/github/callback",

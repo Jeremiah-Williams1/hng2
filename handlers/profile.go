@@ -5,8 +5,10 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"profiles-api/cache"
 	"profiles-api/db"
 	"profiles-api/models"
 	"profiles-api/queries"
@@ -356,16 +358,38 @@ func GetProfileById(w http.ResponseWriter, r *http.Request) {
 func GetProfiles(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 
+	params := map[string]string{
+		"gender":                  strings.ToLower(query.Get("gender")),
+		"country_id":              strings.ToUpper(query.Get("country_id")),
+		"age_group":               strings.ToLower(query.Get("age_group")),
+		"min_age":                 query.Get("min_age"),
+		"max_age":                 query.Get("max_age"),
+		"min_gender_probability":  query.Get("min_gender_probability"),
+		"min_country_probability": query.Get("min_country_probability"),
+		"sort_by":                 strings.ToLower(query.Get("sort_by")),
+		"order":                   strings.ToLower(query.Get("order")),
+		"page":                    query.Get("page"),
+		"limit":                   query.Get("limit"),
+	}
+
+	cacheKey := "get_profiles:" + cache.BuildCacheKey(params)
+
+	if cached, ok := cache.ProfileCache.Get(cacheKey); ok {
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(cached)
+		return
+	}
+
 	builtQuery, err := BuildProfileQuery(models.ProfileQueryParams{
-		Gender:                strings.ToLower(query.Get("gender")),
-		CountryID:             strings.ToUpper(query.Get("country_id")),
-		AgeGroup:              strings.ToLower(query.Get("age_group")),
-		MinAge:                query.Get("min_age"),
-		MaxAge:                query.Get("max_age"),
-		MinGenderProbability:  query.Get("min_gender_probability"),
-		MinCountryProbability: query.Get("min_country_probability"),
-		SortBy:                strings.ToLower(query.Get("sort_by")),
-		OrderBy:               strings.ToLower(query.Get("order")),
+		Gender:                params["gender"],
+		CountryID:             params["country_id"],
+		AgeGroup:              params["age_group"],
+		MinAge:                params["min_age"],
+		MaxAge:                params["max_age"],
+		MinGenderProbability:  params["min_gender_probability"],
+		MinCountryProbability: params["min_country_probability"],
+		SortBy:                params["sort_by"],
+		OrderBy:               params["order"],
 	})
 	if err != nil {
 		w.WriteHeader(http.StatusUnprocessableEntity)
@@ -468,8 +492,7 @@ func GetProfiles(w http.ResponseWriter, r *http.Request) {
 		links.Prev = &prevAddr
 	}
 
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(models.GSuccessResponse{
+	response := models.GSuccessResponse{
 		Status:     "success",
 		Page:       page,
 		Limit:      limit,
@@ -477,7 +500,12 @@ func GetProfiles(w http.ResponseWriter, r *http.Request) {
 		TotalPages: totalPages,
 		Link:       links,
 		Data:       profiles,
-	})
+	}
+
+	cache.ProfileCache.Set(cacheKey, response)
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
 }
 
 // Delete a profile
@@ -834,4 +862,183 @@ func BuildProfileQuery(p models.ProfileQueryParams) (models.ProfileQueryResult, 
 		CountQuery: countQuery,
 		Args:       args,
 	}, nil
+}
+
+func UploadProfiles(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 512<<20) // 512MB cap
+
+	err := r.ParseMultipartForm(32 << 20) // 32MB in memory, rest to disk
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(models.ErrorResponse{Status: "error", Message: "File too large or malformed"})
+		return
+	}
+
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(models.ErrorResponse{Status: "error", Message: "Missing file field"})
+		return
+	}
+	defer file.Close()
+
+	reader := csv.NewReader(file)
+	reader.FieldsPerRecord = -1 // don't panic on inconsistent column counts, we'll validate manually
+
+	// read and validate header row
+	header, err := reader.Read()
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(models.ErrorResponse{Status: "error", Message: "Cannot read CSV header"})
+		return
+	}
+
+	expectedCols := []string{"name", "gender", "age", "country_id"}
+	colIndex := map[string]int{}
+	for i, col := range header {
+		colIndex[strings.ToLower(strings.TrimSpace(col))] = i
+	}
+	for _, required := range expectedCols {
+		if _, ok := colIndex[required]; !ok {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(models.ErrorResponse{Status: "error", Message: "Missing required column: " + required})
+			return
+		}
+	}
+
+	type rowResult struct {
+		inserted int
+		skipped  int
+		reasons  map[string]int
+	}
+
+	// process in chunks
+	const chunkSize = 500
+	totalRows := 0
+	totalInserted := 0
+	totalSkipped := 0
+	reasons := map[string]int{}
+
+	type profileRow struct {
+		name      string
+		gender    string
+		age       int
+		countryID string
+	}
+
+	chunk := make([]profileRow, 0, chunkSize)
+
+	flushChunk := func(rows []profileRow) (int, int, map[string]int) {
+		if len(rows) == 0 {
+			return 0, 0, map[string]int{}
+		}
+
+		// build bulk INSERT with ON CONFLICT DO NOTHING
+		valueStrings := make([]string, 0, len(rows))
+		valueArgs := make([]any, 0, len(rows)*4)
+		idx := 1
+		for _, row := range rows {
+			valueStrings = append(valueStrings,
+				fmt.Sprintf("($%d, $%d, $%d, $%d)", idx, idx+1, idx+2, idx+3))
+			valueArgs = append(valueArgs, row.name, row.gender, row.age, row.countryID)
+			idx += 4
+		}
+
+		sqlStr := "INSERT INTO profiles (name, gender, age, country_id) VALUES " +
+			strings.Join(valueStrings, ",") +
+			" ON CONFLICT (name) DO NOTHING"
+
+		result, err := db.DB.Exec(sqlStr, valueArgs...)
+		if err != nil {
+			// entire chunk failed — count all as skipped
+			return 0, len(rows), map[string]int{"db_error": len(rows)}
+		}
+
+		affected, _ := result.RowsAffected()
+		duplicates := len(rows) - int(affected)
+		skippedReasons := map[string]int{}
+		if duplicates > 0 {
+			skippedReasons["duplicate_name"] = duplicates
+		}
+		return int(affected), duplicates, skippedReasons
+	}
+
+	for {
+		record, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			totalRows++
+			totalSkipped++
+			reasons["malformed_row"]++
+			continue
+		}
+
+		totalRows++
+
+		// validate column count
+		if len(record) < len(expectedCols) {
+			totalSkipped++
+			reasons["missing_fields"]++
+			continue
+		}
+
+		name := strings.TrimSpace(record[colIndex["name"]])
+		gender := strings.ToLower(strings.TrimSpace(record[colIndex["gender"]]))
+		ageStr := strings.TrimSpace(record[colIndex["age"]])
+		countryID := strings.ToUpper(strings.TrimSpace(record[colIndex["country_id"]]))
+
+		// validate fields
+		if name == "" || gender == "" || ageStr == "" || countryID == "" {
+			totalSkipped++
+			reasons["missing_fields"]++
+			continue
+		}
+
+		age, err := strconv.Atoi(ageStr)
+		if err != nil || age < 0 || age > 150 {
+			totalSkipped++
+			reasons["invalid_age"]++
+			continue
+		}
+
+		if gender != "male" && gender != "female" {
+			totalSkipped++
+			reasons["invalid_gender"]++
+			continue
+		}
+
+		chunk = append(chunk, profileRow{name, gender, age, countryID})
+
+		if len(chunk) == chunkSize {
+			ins, skp, rsns := flushChunk(chunk)
+			totalInserted += ins
+			totalSkipped += skp
+			for k, v := range rsns {
+				reasons[k] += v
+			}
+			chunk = chunk[:0] // reset slice, reuse backing array
+		}
+	}
+
+	// flush remaining rows
+	ins, skp, rsns := flushChunk(chunk)
+	totalInserted += ins
+	totalSkipped += skp
+	for k, v := range rsns {
+		reasons[k] += v
+	}
+
+	// invalidate cache so next read sees fresh data
+	cache.ProfileCache.Invalidate()
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]any{
+		"status":     "success",
+		"total_rows": totalRows,
+		"inserted":   totalInserted,
+		"skipped":    totalSkipped,
+		"reasons":    reasons,
+	})
 }

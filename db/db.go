@@ -65,6 +65,12 @@ func InitializeSchema() error {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );`
 
+	const indexSchema = `
+    CREATE INDEX IF NOT EXISTS idx_profiles_gender ON profiles(gender);
+    CREATE INDEX IF NOT EXISTS idx_profiles_country_id ON profiles(country_id);
+    CREATE INDEX IF NOT EXISTS idx_profiles_age ON profiles(age);
+    CREATE INDEX IF NOT EXISTS idx_profiles_age_group ON profiles(age_group);
+`
 	_, err := DB.Exec(tableSchema)
 	if err != nil {
 		return err
@@ -76,6 +82,11 @@ func InitializeSchema() error {
 	}
 
 	_, err = DB.Exec(tokenSchema)
+	if err != nil {
+		return err
+	}
+
+	_, err = DB.Exec(indexSchema)
 	if err != nil {
 		return err
 	}
