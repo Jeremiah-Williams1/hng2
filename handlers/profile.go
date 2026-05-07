@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"profiles-api/cache"
 	"profiles-api/db"
@@ -539,7 +538,6 @@ func DeleteProfile(w http.ResponseWriter, r *http.Request) {
 }
 
 func SearchProfiles(w http.ResponseWriter, r *http.Request) {
-	log.Print("the search handler was called")
 	rawQ := strings.TrimSpace(r.URL.Query().Get("q"))
 	if rawQ == "" {
 		w.WriteHeader(http.StatusBadRequest)
@@ -555,6 +553,25 @@ func SearchProfiles(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(models.ErrorResponse{
 			Status: "error", Message: "Unable to interpret query",
 		})
+		return
+	}
+
+	// Caching implementation
+	params := map[string]string{
+		"gender":     parsed.Gender,
+		"country_id": parsed.CountryID,
+		"age_group":  parsed.AgeGroup,
+		"min_age":    parsed.MinAge,
+		"max_age":    parsed.MaxAge,
+		"page":       r.URL.Query().Get("page"),
+		"limit":      r.URL.Query().Get("limit"),
+	}
+
+	cacheKey := "search_profiles:" + cache.BuildCacheKey(params)
+
+	if cached, ok := cache.ProfileCache.Get(cacheKey); ok {
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(cached)
 		return
 	}
 
@@ -665,8 +682,7 @@ func SearchProfiles(w http.ResponseWriter, r *http.Request) {
 		links.Prev = &prevAddr
 	}
 
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(models.GSuccessResponse{
+	response := models.GSuccessResponse{
 		Status:     "success",
 		Page:       page,
 		Limit:      limit,
@@ -674,7 +690,12 @@ func SearchProfiles(w http.ResponseWriter, r *http.Request) {
 		TotalPages: totalPages,
 		Link:       links,
 		Data:       profiles,
-	})
+	}
+
+	cache.ProfileCache.Set(cacheKey, response)
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
 }
 
 // Export csv Endpoint

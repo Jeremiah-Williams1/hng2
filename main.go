@@ -106,6 +106,12 @@ func main() {
 				corsMiddleware(middleware.VersionMiddleware(middleware.AuthMiddleware(
 					middleware.RBACMiddleware("admin")(handlers.DeleteProfile)))))))
 
+	mux.HandleFunc("POST /api/profiles/upload",
+		middleware.LoggingMiddleware(
+			middleware.RateLimiterMiddleWare(60, time.Minute)(
+				corsMiddleware(middleware.VersionMiddleware(middleware.AuthMiddleware(
+					middleware.RBACMiddleware("admin")(handlers.UploadProfiles)))))))
+
 	mux.HandleFunc("GET /api/users/me",
 		middleware.LoggingMiddleware(
 			middleware.RateLimiterMiddleWare(60, time.Minute)(
